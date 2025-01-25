@@ -53,13 +53,19 @@ Your completion of this task will be graded based on your `test.a0.task2.problem
 For each of the problems you solved in task 2, characterise the bug in your own words and explain one other scenario that may cause this 
 type of bug.
 
-Problem 1:
+Problem 1: Bugs includes 1) std::out being spelled as "std::our", 2) forget to add ; at the end of line 21 (printf line), 
+and 3) try to concatenate std::string str and const char* ", " using + operator in line 23
+Scenario: you mistake in typing things, or you directly apply python syntax to C++ programming.
 
-Problem 2:
+Problem 2: when calculating y/3, the division between two intergers gives a integer that rounds towards the smallest absolute value, instead of a float value that can be used to compare.
+Scenario: When scaling the coordinates, you forget to explicitly define/convert an interger value as/to float before dividing it with another integer.
 
-Problem 3:
+Problem 3: vector::end() points to an undefined position after the last element of the vector, which returns nothing. vector::back() truly returns the value of the last element.
+Scenario: When you don't read the documentation and try to access the last element in a vector.
 
-Problem 4:
+Problem 4: (vec1.at(i) == vec2.at(j)) == vec3.at(k) cannot compare 3 integer values, because (vec1.at(i) == vec2.at(j)) returns a boolean, so the second comparision is comparing two boolean values.
+in C++, any non-zero integer is treated as true when used in a boolean context.
+Scenario: When you don't know how to use && operator in mananging multiple conditions.
 
 
 (##) A0T3
