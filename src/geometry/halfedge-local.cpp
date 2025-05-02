@@ -331,8 +331,46 @@ std::optional<Halfedge_Mesh::FaceRef> Halfedge_Mesh::extrude_face(FaceRef f) {
  */
 std::optional<Halfedge_Mesh::EdgeRef> Halfedge_Mesh::flip_edge(EdgeRef e) {
 	//A2L1: Flip Edge
+	//collect
 	
-    return std::nullopt;
+	HalfedgeRef h = e->halfedge;
+
+	//Boundary edge check
+	if (h->twin->face->boundary)
+	{
+		return std::nullopt;
+	}
+
+	HalfedgeRef t = h->twin;
+	VertexRef v1 = h->next->vertex;
+	VertexRef v2 = t->next->vertex;
+	VertexRef v3 = h->next->next->vertex;
+	VertexRef v4 = t->next->next->vertex;
+	FaceRef f1 = h->face;
+	FaceRef f2 = t->face;
+
+	// invalid mesh checking
+	if (v1 == v3 || v1 == v4|| v2 == v3 || v2 == v4)
+	{
+		return std::nullopt;
+	}
+
+	h->next = v3->halfedge;
+	t->next = v4->halfedge;
+
+	//disconnect
+	v1->halfedge = h->next;
+	v2->halfedge = t->next;
+	f1->halfedge = h;
+	f2->halfedge = t;
+
+	//connect
+	t->vertex = v3;
+	h->vertex = v4;
+
+	// e->halfedge = h;
+
+    return e;
 }
 
 

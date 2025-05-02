@@ -26,7 +26,21 @@ Spectrum sample_bilinear(HDR_Image const &image, Vec2 uv) {
 	// A1T6: sample_bilinear
 	//TODO: implement bilinear sampling strategy on texture 'image'
 
-	return sample_nearest(image, uv); //placeholder so image doesn't look blank
+	int x = (int) std::floor(uv.x - 0.5f);
+	int y = (int) std::floor(uv.y - 0.5f);
+	float detX = uv.x - x;
+	float detY = uv.y - y;
+	Spectrum t0 = image.at(x, y);
+	Spectrum t1 = image.at(x+1, y);
+	Spectrum t2 = image.at(x, y+1);
+	Spectrum t3 = image.at(x+1, y+1);
+
+	Spectrum tx = (1-detX)*t0+detX*t1;
+	Spectrum ty = (1-detY)*t2 + detY*t3;
+
+	Spectrum result = (1-detY)*tx + detY*ty;
+
+	return result; //placeholder so image doesn't look blank
 }
 
 
@@ -34,7 +48,15 @@ Spectrum sample_trilinear(HDR_Image const &base, std::vector< HDR_Image > const 
 	// A1T6: sample_trilinear
 	//TODO: implement trilinear sampling strategy on using mip-map 'levels'
 
-	return sample_nearest(base, uv); //placeholder so image doesn't look blank
+	float d = std::log2(lod);
+	float d1 = std::floor(d);
+
+	Spectrum td = sample_bilinear(levels[(int)d1], uv);
+	Spectrum td1 = sample_bilinear(levels[(int)d1+1], uv);
+	Spectrum result = (1-d+d1)*td + (d-d1)*td1;
+
+
+	return result; //placeholder so image doesn't look blank
 }
 
 /*
@@ -92,7 +114,31 @@ void generate_mipmap(HDR_Image const &base, std::vector< HDR_Image > *levels_) {
 		//TODO: Write code to fill the levels of the mipmap hierarchy by downsampling
 
 		//Be aware that the alignment of the samples in dst and src will be different depending on whether the image is even or odd.
+		// idea: linearly interpolate four "blocks" of src as 1 block in dst
+		// the 2 assertions above tells me to ignore last column/row when it's odd
 
+		//bool wOdd = (src.w % 2 == 0);
+		//bool hOdd = (src.h % 2 == 0);
+
+		for (unsigned int u = 0; u < dst.w; ++u)
+		{
+			for (unsigned int v = 0; v < dst.h; ++v)
+			{
+				int w1 = 2*u;
+				int w2 = w1+1;
+				int h1 = 2*v;
+				int h2 = h1+1;
+
+				Spectrum s1 = src.at(w1,h1);
+				Spectrum s2 = src.at(w1,h2);
+				Spectrum s3 = src.at(w2,h1);
+				Spectrum s4 = src.at(w2,h2);
+
+				Spectrum result = (s1+s2+s3+s4) / 4;
+
+				dst.at(u,v) = result;
+			}
+		}
 	};
 
 	std::cout << "Regenerating mipmap (" << levels.size() << " levels): [" << base.w << "x" << base.h << "]";

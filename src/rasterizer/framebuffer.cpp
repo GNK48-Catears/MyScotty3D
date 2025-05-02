@@ -33,7 +33,13 @@ HDR_Image Framebuffer::resolve_colors() const {
 
 	for (uint32_t y = 0; y < height; ++y) {
 		for (uint32_t x = 0; x < width; ++x) {
-			image.at(x, y) = color_at(x, y, 0);
+			size_t sampleSize = sample_pattern.centers_and_weights.size();
+			Spectrum result(0.0f);
+			for (uint32_t i = 0; i< sampleSize; ++i)
+			{
+				result += color_at(x,y,i)*sample_pattern.centers_and_weights[i][2];
+			}
+			image.at(x, y) = result;
 		}
 	}
 

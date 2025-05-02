@@ -112,6 +112,9 @@ void Pipeline<primitive_type, Program, flags>::run(std::vector<Vertex> const& ve
 	// depth test + shade + blend fragments:
 	uint32_t out_of_range = 0; // check if rasterization produced fragments outside framebuffer 
 							   // (indicates something is wrong with clipping)
+	
+	std::vector< Vec3 > const &samples = framebuffer.sample_pattern.centers_and_weights;
+	//      	for (uint32_t s = 0; s < samples.size(); ++s) { ... }
 	for (auto const& f : fragments) {
 
 		// fragment location (in pixels):
@@ -126,11 +129,10 @@ void Pipeline<primitive_type, Program, flags>::run(std::vector<Vertex> const& ve
 			++out_of_range;
 			continue;
 		}
-
+		
 		// local names that refer to destination sample in framebuffer:
 		float& fb_depth = framebuffer.depth_at(x, y, 0);
 		Spectrum& fb_color = framebuffer.color_at(x, y, 0);
-
 
 		// depth test:
 		if constexpr ((flags & PipelineMask_Depth) == Pipeline_Depth_Always) {
@@ -142,6 +144,11 @@ void Pipeline<primitive_type, Program, flags>::run(std::vector<Vertex> const& ve
 			// "Less" means the depth test passes when the new fragment has depth less than the stored depth.
 			// A1T4: Depth_Less
 			// TODO: implement depth test! We want to only emit fragments that have a depth less than the stored depth, hence "Depth_Less".
+
+			if(f.fb_position.z >= fb_depth)
+			{
+				continue;
+			}
 		} else {
 			static_assert((flags & PipelineMask_Depth) <= Pipeline_Depth_Always, "Unknown depth test flag.");
 		}
@@ -151,29 +158,41 @@ void Pipeline<primitive_type, Program, flags>::run(std::vector<Vertex> const& ve
 			fb_depth = f.fb_position.z;
 		}
 
-		// shade fragment:
-		ShadedFragment sf;
-		sf.fb_position = f.fb_position;
-		Program::shade_fragment(parameters, f.attributes, f.derivatives, &sf.color, &sf.opacity);
+		for (uint32_t s = 0; s < samples.size(); ++s)
+		{
 
-		// write color to framebuffer if color writes aren't disabled:
-		if constexpr (!(flags & Pipeline_ColorWriteDisableBit)) {
-			// blend fragment:
-			if constexpr ((flags & PipelineMask_Blend) == Pipeline_Blend_Replace) {
-				fb_color = sf.color;
-			} else if constexpr ((flags & PipelineMask_Blend) == Pipeline_Blend_Add) {
-				// A1T4: Blend_Add
-				// TODO: framebuffer color should have fragment color multiplied by fragment opacity added to it.
-				fb_color = sf.color; //<-- replace this line
-			} else if constexpr ((flags & PipelineMask_Blend) == Pipeline_Blend_Over) {
-				// A1T4: Blend_Over
-				// TODO: set framebuffer color to the result of "over" blending (also called "alpha blending") the fragment color over the framebuffer color, using the fragment's opacity
-				// 		 You may assume that the framebuffer color has its alpha premultiplied already, and you just want to compute the resulting composite color
-				fb_color = sf.color; //<-- replace this line
-			} else {
-				static_assert((flags & PipelineMask_Blend) <= Pipeline_Blend_Over, "Unknown blending flag.");
+
+			Vec3 sample_offset = samples[s];  // Each sample's offset in the pixel
+        	Vec3 sample_fb_position = f.fb_position + sample_offset; // Adjusted fragment position
+
+
+
+			// shade fragment:
+			ShadedFragment sf;
+			sf.fb_position = sample_fb_position;
+			Program::shade_fragment(parameters, f.attributes, f.derivatives, &sf.color, &sf.opacity);
+			
+			// write color to framebuffer if color writes aren't disabled:
+			if constexpr (!(flags & Pipeline_ColorWriteDisableBit)) {
+				// blend fragment:
+				if constexpr ((flags & PipelineMask_Blend) == Pipeline_Blend_Replace) {
+					fb_color = sf.color;
+				} else if constexpr ((flags & PipelineMask_Blend) == Pipeline_Blend_Add) {
+					// A1T4: Blend_Add
+					// TODO: framebuffer color should have fragment color multiplied by fragment opacity added to it.
+					fb_color += sf.color*sf.opacity; //<-- replace this line
+				} else if constexpr ((flags & PipelineMask_Blend) == Pipeline_Blend_Over) {
+					// A1T4: Blend_Over
+					// TODO: set framebuffer color to the result of "over" blending (also called "alpha blending") the fragment color over the framebuffer color, using the fragment's opacity
+					// 		 You may assume that the framebuffer color has its alpha premultiplied already, and you just want to compute the resulting composite color
+					fb_color = sf.color*sf.opacity + (1-sf.opacity)*fb_color; //<-- replace this line
+				} else {
+					static_assert((flags & PipelineMask_Blend) <= Pipeline_Blend_Over, "Unknown blending flag.");
+				}
 			}
 		}
+
+
 	}
 	if (out_of_range > 0) {
 		if constexpr (primitive_type == PrimitiveType::Lines) {
@@ -361,14 +380,112 @@ void Pipeline<p, P, flags>::rasterize_line(
 	// this function!
 	// The OpenGL specification section 3.5 may also come in handy.
 
-	{ // As a placeholder, draw a point in the middle of the line:
-		//(remove this code once you have a real implementation)
-		Fragment mid;
-		mid.fb_position = (va.fb_position + vb.fb_position) / 2.0f;
-		mid.attributes = va.attributes;
-		mid.derivatives.fill(Vec2(0.0f, 0.0f));
-		emit_fragment(mid);
+    const float eps = 1e-5f;
+    Vec2 a = Vec2(va.fb_position.x, va.fb_position.y) + Vec2(eps, eps * eps);
+    Vec2 b = Vec2(vb.fb_position.x, vb.fb_position.y) + Vec2(eps, eps * eps);
+
+	float zStart = va.fb_position.z;
+	float zEnd = vb.fb_position.z;
+    
+	// Ensure abs(slope) < 1
+	bool x_major = std::abs(b.x - a.x) > std::abs(b.y - a.y);
+	int i = x_major? 0 : 1;
+	int j = x_major? 1 : 0;
+
+	// Ensure first & fourth octant
+	if (a[i] > b[i])
+	{
+		std::swap(a,b);
+		zStart = vb.fb_position.z;
+		zEnd = va.fb_position.z;
 	}
+
+	// Diamond Exit Math (by Jerry)
+	// y > -x + (u+v+1.5) or y < x + (v-u-0.5)
+	// u,v are the floor(x2), floor(y2)
+
+	// Assume the first point is always valid
+	int x1 = (int)std::floor(a[i]);
+	int y1 = (int)std::floor(a[j]);
+
+	int u = (int)std::floor(b[i]);
+	int v = (int)std::floor(b[j]);
+
+	int x2, y2;
+
+	// Check Diamond Exit condition for endpoint (Exit either NE or SE side)
+	if (b[j] > -b[i] + u+v +1.5)
+	{
+		x2 = (int)std::ceil(b[i]);
+		y2 = (int)std::ceil(b[j]);
+	}
+	else if ( b[j] < b[i] + v-u-0.5)
+	{
+		x2 = (int)std::ceil(b[i]);
+		y2 = (int)std::floor(b[j]);
+	}
+	else
+	{
+		x2 = (int)std::floor(b[i]);
+		y2 = (int)std::floor(b[j]);
+	}
+
+
+	int dx = x2 - x1;
+	int dy = y2 - y1;
+	int y = y1;
+	int err = 0;
+
+	if (dx == 0)// If start and end point are the same, means no exit, means no plot
+	{
+		return; 
+	}
+
+	for (int x = x1; x < x2; x++) // x < x2 mean that if the final point exit diamond, I always make it overshoot
+	{
+		// Plot first
+		{
+			Fragment frag;
+
+			frag.fb_position = Vec3(x + 0.5f, y + 0.5f, 0.0f);
+
+			if (!x_major)
+			{
+				frag.fb_position = Vec3(y + 0.5f, x + 0.5f, 0.0f);
+			}
+
+			frag.fb_position.z = (x + 0.5f - x1)/(x2 - x1)*(zEnd - zStart) + zStart;
+			frag.attributes = va.attributes;
+			frag.derivatives.fill(Vec2(0.0f, 0.0f));
+
+			emit_fragment(frag);
+		}
+
+		err += std::abs(dy);
+		if ((err << 1) >= dx)
+		{
+			if (dy>0)
+			{
+				y++;
+			}
+			else{
+				y--;
+			}
+			
+			
+			err -= dx;
+		}
+
+	}
+
+	// { // As a placeholder, draw a point in the middle of the line:
+	// 	//(remove this code once you have a real implementation)
+	// 	Fragment mid;
+	// 	mid.fb_position = (va.fb_position + vb.fb_position) / 2.0f;
+	// 	mid.attributes = va.attributes;
+	// 	mid.derivatives.fill(Vec2(0.0f, 0.0f));
+	// 	emit_fragment(mid);
+	// }
 
 }
 
@@ -409,6 +526,8 @@ void Pipeline<p, P, flags>::rasterize_line(
  *  This is pretty tricky to get exactly right!
  *
  */
+
+
 template<PrimitiveType p, class P, uint32_t flags>
 void Pipeline<p, P, flags>::rasterize_triangle(
 	ClippedVertex const& va, ClippedVertex const& vb, ClippedVertex const& vc,
@@ -417,30 +536,187 @@ void Pipeline<p, P, flags>::rasterize_triangle(
 	//  same code paths. Be aware, however, that all of them need to remain working!
 	//  (e.g., if you break Flat while implementing Correct, you won't get points
 	//   for Flat.)
-	if constexpr ((flags & PipelineMask_Interp) == Pipeline_Interp_Flat) {
-		// A1T3: flat triangles
-		// TODO: rasterize triangle (see block comment above this function).
 
-		// As a placeholder, here's code that draws some lines:
-		//(remove this and replace it with a real solution)
-		Pipeline<PrimitiveType::Lines, P, flags>::rasterize_line(va, vb, emit_fragment);
-		Pipeline<PrimitiveType::Lines, P, flags>::rasterize_line(vb, vc, emit_fragment);
-		Pipeline<PrimitiveType::Lines, P, flags>::rasterize_line(vc, va, emit_fragment);
-	} else if constexpr ((flags & PipelineMask_Interp) == Pipeline_Interp_Smooth) {
-		// A1T5: screen-space smooth triangles
-		// TODO: rasterize triangle (see block comment above this function).
+	
+	auto edge_function = [&](const Vec2& a, const Vec2& b, const Vec2& p)-> float{
+		return (p.x - a.x) * (b.y - a.y) - (p.y - a.y) * (b.x - a.x);
+	};
 
-		// As a placeholder, here's code that calls the Flat interpolation version of the function:
-		//(remove this and replace it with a real solution)
-		Pipeline<PrimitiveType::Lines, P, (flags & ~PipelineMask_Interp) | Pipeline_Interp_Flat>::rasterize_triangle(va, vb, vc, emit_fragment);
-	} else if constexpr ((flags & PipelineMask_Interp) == Pipeline_Interp_Correct) {
-		// A1T5: perspective correct triangles
-		// TODO: rasterize triangle (block comment above this function).
+	// barycentric coord
+	// abs(AB x AP)/ total area
+	// cross product (2d): AB.x*AP.y - AB.y*AP.x
+	auto bary_allen = [&](const Vec2& a, const Vec2& b, const Vec2& p, const float& totalArea) -> float{
+		return ((b.x-a.x)*(p.y-a.y)-(b.y-a.y)*(p.x-a.x))/totalArea;
+	};
 
-		// As a placeholder, here's code that calls the Screen-space interpolation function:
-		//(remove this and replace it with a real solution)
-		Pipeline<PrimitiveType::Lines, P, (flags & ~PipelineMask_Interp) | Pipeline_Interp_Smooth>::rasterize_triangle(va, vb, vc, emit_fragment);
+	// create bounding box
+	float xMax = std::max({va.fb_position.x, vb.fb_position.x, vc.fb_position.x});
+	float yMax = std::max({va.fb_position.y, vb.fb_position.y, vc.fb_position.y});
+	float xMin = std::min({va.fb_position.x, vb.fb_position.x, vc.fb_position.x});
+	float yMin = std::min({va.fb_position.y, vb.fb_position.y, vc.fb_position.y});
+
+	// std::cout<<xMax<<yMax<<xMin<<yMin<<std::endl;
+
+	int xBoundMin = (int)std::floor(xMin);
+	int xBoundMax = (int)std::ceil(xMax);
+	int yBoundMin = (int)std::floor(yMin);
+	int yBoundMax = (int)std::ceil(yMax);
+
+	// total area of the triangle * 2
+	// AB x AC
+	float tArea = std::abs((vb.fb_position.x-va.fb_position.x)*(vc.fb_position.y-va.fb_position.y) - (vb.fb_position.y-va.fb_position.y)*(vc.fb_position.x-va.fb_position.x));
+
+	for (int u = xBoundMin; u <= xBoundMax; u++)
+	{
+		for (int v = yBoundMin; v <= yBoundMax; v++)
+		{				
+			Vec2 pp = Vec2(u+0.5f,v+0.5f);
+			
+			float edge_ab = edge_function(va.fb_position.xy(), vb.fb_position.xy(), pp);
+			float edge_bc = edge_function(vb.fb_position.xy(), vc.fb_position.xy(), pp);
+			float edge_ca = edge_function(vc.fb_position.xy(), va.fb_position.xy(), pp);
+			
+			/*
+			float bary_c = bary_allen(va.fb_position.xy(), vb.fb_position.xy(), pp, tArea);
+			float bary_b = bary_allen(va.fb_position.xy(), vc.fb_position.xy(), pp, tArea);
+			float bary_a = bary_allen(vb.fb_position.xy(), vc.fb_position.xy(), pp, tArea);
+			*/
+
+			if (edge_ab * edge_bc>=.0f && edge_bc* edge_ca>=.0f)// can frag at this pixel, lazy way, not checking orders
+			{
+				float phiA = std::abs(edge_bc)/tArea;
+				float phiB = std::abs(edge_ca)/tArea;
+				float phiC = std::abs(edge_ab)/tArea;
+				
+				if constexpr ((flags & PipelineMask_Interp) == Pipeline_Interp_Flat) {
+				// A1T3: flat triangles
+				// TODO: rasterize triangle (see block comment above this function).
+
+					// just emit
+					{
+						Fragment frag;
+						frag.fb_position = Vec3(pp.x, pp.y, 0.5f);
+						frag.fb_position.z = phiA * va.fb_position.z + 
+							phiB * vb.fb_position.z + phiC * vc.fb_position.z;
+
+						frag.attributes = va.attributes;
+						frag.derivatives.fill(Vec2(0.0f, 0.0f));
+
+						emit_fragment(frag);
+					}
+				
+				} else if constexpr ((flags & PipelineMask_Interp) == Pipeline_Interp_Smooth) {
+					// A1T5: screen-space smooth triangles
+					// TODO: rasterize triangle (see block comment above this function).
+					{
+						Fragment frag;
+						frag.fb_position = Vec3(pp.x, pp.y, 0.5f);
+						frag.fb_position.z = phiA * va.fb_position.z + 
+							phiB * vb.fb_position.z + phiC * vc.fb_position.z;
+						
+						for (size_t i = 0; i < frag.attributes.size(); ++i) {
+							frag.attributes[i] = phiA * va.attributes[i] + 
+												phiB * vb.attributes[i] + 
+												phiC * vc.attributes[i];
+						}
+
+						// derivatives based on perspective-correct
+						// Compute attribute values at neighboring pixels
+						Vec2 frag_dx = Vec2(pp.x + 1.0f, pp.y);
+						Vec2 frag_dy = Vec2(pp.x, pp.y + 1.0f);
+
+						// Compute barycentric weights at (x+1, y) and (x, y+1)
+						float phiA_dx = edge_function(vb.fb_position.xy(), vc.fb_position.xy(), frag_dx) / tArea;
+						float phiB_dx = edge_function(vc.fb_position.xy(), va.fb_position.xy(), frag_dx) / tArea;
+						float phiC_dx = edge_function(va.fb_position.xy(), vb.fb_position.xy(), frag_dx) / tArea;
+
+						float phiA_dy = edge_function(vb.fb_position.xy(), vc.fb_position.xy(), frag_dy) / tArea;
+						float phiB_dy = edge_function(vc.fb_position.xy(), va.fb_position.xy(), frag_dy) / tArea;
+						float phiC_dy = edge_function(va.fb_position.xy(), vb.fb_position.xy(), frag_dy) / tArea;
+
+						float pInv_dx = phiA_dx*va.inv_w + phiB_dx*vb.inv_w + phiC_dx*vc.inv_w;
+						float pInv_dy = phiA_dy*va.inv_w + phiB_dy*vb.inv_w + phiC_dy*vc.inv_w;
+						
+						// Compute attribute values at neighboring pixels
+						for (size_t i = 0; i < frag.attributes.size(); ++i) {
+							float attributes_dx = (phiA_dx * va.attributes[i]*va.inv_w + 
+												phiB_dx * vb.attributes[i]*vb.inv_w + 
+												phiC_dx * vc.attributes[i]*vc.inv_w) / pInv_dx;
+
+							float attributes_dy = (phiA_dy * va.attributes[i]*va.inv_w + 
+												phiB_dy * vb.attributes[i]*vb.inv_w + 
+												phiC_dy * vc.attributes[i]*vc.inv_w) / pInv_dy;
+
+							frag.derivatives[i].x = attributes_dx - frag.attributes[i];
+							frag.derivatives[i].y = attributes_dy - frag.attributes[i];
+						}
+						
+
+						emit_fragment(frag);
+					}
+					
+				} else if constexpr ((flags & PipelineMask_Interp) == Pipeline_Interp_Correct) {
+					// A1T5: perspective correct triangles
+					// TODO: rasterize triangle (block comment above this function).
+
+					// As a placeholder, here's code that calls the Screen-space interpolation function:
+					{
+						Fragment frag;
+						frag.fb_position = Vec3(pp.x, pp.y, 0.5f);
+						frag.fb_position.z = phiA * va.fb_position.z + 
+							phiB * vb.fb_position.z + phiC * vc.fb_position.z;
+
+						// frag.attributes = phiA*va.attributes + phiB*vb.attributes + phiC*vc.attributes;
+						float pInv = phiA * va.inv_w + phiB * vb.inv_w + phiC * vc.inv_w;
+
+						for (size_t i = 0; i < frag.attributes.size(); ++i) {
+							frag.attributes[i] = (phiA * va.attributes[i]*va.inv_w + 
+												phiB * vb.attributes[i]*vb.inv_w + 
+												phiC * vc.attributes[i]*vc.inv_w)/pInv;
+						}
+						
+						// frag.derivatives.fill(Vec2(0.0f, 0.0f));
+
+						// Compute attribute values at neighboring pixels
+						Vec2 frag_dx = Vec2(pp.x + 1.0f, pp.y);
+						Vec2 frag_dy = Vec2(pp.x, pp.y + 1.0f);
+
+						// Compute barycentric weights at (x+1, y) and (x, y+1)
+						float phiA_dx = edge_function(vb.fb_position.xy(), vc.fb_position.xy(), frag_dx) / tArea;
+						float phiB_dx = edge_function(vc.fb_position.xy(), va.fb_position.xy(), frag_dx) / tArea;
+						float phiC_dx = edge_function(va.fb_position.xy(), vb.fb_position.xy(), frag_dx) / tArea;
+
+						float phiA_dy = edge_function(vb.fb_position.xy(), vc.fb_position.xy(), frag_dy) / tArea;
+						float phiB_dy = edge_function(vc.fb_position.xy(), va.fb_position.xy(), frag_dy) / tArea;
+						float phiC_dy = edge_function(va.fb_position.xy(), vb.fb_position.xy(), frag_dy) / tArea;
+
+						float pInv_dx = phiA_dx*va.inv_w + phiB_dx*vb.inv_w + phiC_dx*vc.inv_w;
+						float pInv_dy = phiA_dy*va.inv_w + phiB_dy*vb.inv_w + phiC_dy*vc.inv_w;
+						
+						// Compute attribute values at neighboring pixels
+						for (size_t i = 0; i < frag.attributes.size(); ++i) {
+							float attributes_dx = (phiA_dx * va.attributes[i]*va.inv_w + 
+												phiB_dx * vb.attributes[i]*vb.inv_w + 
+												phiC_dx * vc.attributes[i]*vc.inv_w) / pInv_dx;
+
+							float attributes_dy = (phiA_dy * va.attributes[i]*va.inv_w + 
+												phiB_dy * vb.attributes[i]*vb.inv_w + 
+												phiC_dy * vc.attributes[i]*vc.inv_w) / pInv_dy;
+
+							frag.derivatives[i].x = attributes_dx - frag.attributes[i];
+							frag.derivatives[i].y = attributes_dy - frag.attributes[i];
+						}
+
+						emit_fragment(frag);
+					}					
+					
+					
+				}
+			}
+
+		}
 	}
+
 }
 
 //-------------------------------------------------------------------------
